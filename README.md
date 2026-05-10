@@ -28,7 +28,7 @@ runtimeConfig:
 
 
 It then generates CA keypairs for each cluster. There are 3 container images to build: the signer controller, the server, and the client.
-The signer controller is deployed to both clusters, while the client and server pods are deployed to cluster-a and cluster-b respectively. 
+The signer controller is deployed to both clusters, while the client and server pods are deployed to `cluster-a` and `cluster-b` respectively. 
 Both server and client pods use `podCertificate` projected volumes to obtain their TLS credentials, and `clusterTrustBundle` projected volumes to obtain the remote CA certificate for verification. 
 Finally, the client connects to the server over mTLS and verifies successful communication.
 
@@ -37,8 +37,7 @@ Finally, the client connects to the server over mTLS and verifies successful com
 When a pod with a `podCertificate` volume mounts, kubelet generates an ECDSA P-256 keypair and 
 creates a `PodCertificateRequest` (PCR) object. Then the signer controller watches for PCRs, 
 extracts the PKIX public key, issues a certificate with DNS SAN = `<podName>.<namespace>`, 
-and writes the PEM-encoded cert chain to `status.certificateChain`. Kubelet detects the issued certificate, mounts it into the pod as a single PEM bundle (private key + cert chain),
-and refreshes it before expiration.
+and writes the PEM-encoded cert chain to `status.certificateChain`. Kubelet detects the issued certificate, mounts it into the pod as a single PEM bundle (private key + cert chain), and refreshes it before expiration.
 
 Server pod (cluster-b):
 
