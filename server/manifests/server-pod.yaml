@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mtls-server
+  namespace: server
+  labels:
+    app: mtls-server
+spec:
+  containers:
+  - name: server
+    image: sample-server:local
+    imagePullPolicy: Never
+    env:
+    - name: CREDS_BUNDLE
+      value: /run/tls/server-creds.pem
+    - name: TRUST_BUNDLE
+      value: /run/tls/client-ca.pem
+    - name: LISTEN_ADDR
+      value: ":8443"
+    ports:
+    - containerPort: 8443
+    volumeMounts:
+    - name: tls
+      mountPath: /run/tls
+      readOnly: true
+  volumes:
+  - name: tls
+    projected:
+      sources:
+      - podCertificate:
+          signerName: "sample.io/mtls-signer"
+          keyType: ECDSAP256
+          credentialBundlePath: server-creds.pem
+      - clusterTrustBundle:
+          signerName: "sample.io/mtls-signer"
+          labelSelector:
+            matchLabels:
+              usage: remote-ca
+          path: client-ca.pem
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mtls-server
+  namespace: server
+spec:
+  type: NodePort
+  selector:
+    app: mtls-server
+  ports:
+  - port: 8443
+    targetPort: 8443
+    nodePort: 30443
