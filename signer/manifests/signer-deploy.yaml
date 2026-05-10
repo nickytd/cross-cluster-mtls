@@ -1,0 +1,32 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: signer
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: signer
+  template:
+    metadata:
+      labels:
+        app: signer
+    spec:
+      serviceAccountName: signer
+      containers:
+      - name: signer
+        image: sample-signer:local
+        imagePullPolicy: Never
+        env:
+        - name: CA_KEY_FILE
+          value: /run/ca/tls.key
+        - name: CA_CERT_FILE
+          value: /run/ca/tls.crt
+        volumeMounts:
+        - name: ca
+          mountPath: /run/ca
+          readOnly: true
+      volumes:
+      - name: ca
+        secret:
+          secretName: signer-ca
