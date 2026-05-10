@@ -1,0 +1,37 @@
+apiVersion: v1
+kind: Pod
+metadata:
+  name: mtls-client
+  namespace: client
+  labels:
+    app: mtls-client
+spec:
+  containers:
+  - name: client
+    image: sample-client:local
+    imagePullPolicy: Never
+    env:
+    - name: CREDS_BUNDLE
+      value: /run/tls/client-creds.pem
+    - name: TRUST_BUNDLE
+      value: /run/tls/server-ca.pem
+    - name: SERVER_ADDR
+      value: "SERVER_IP_PLACEHOLDER:30443"
+    volumeMounts:
+    - name: tls
+      mountPath: /run/tls
+      readOnly: true
+  volumes:
+  - name: tls
+    projected:
+      sources:
+      - podCertificate:
+          signerName: "sample.io/mtls-signer"
+          keyType: ECDSAP256
+          credentialBundlePath: client-creds.pem
+      - clusterTrustBundle:
+          signerName: "sample.io/mtls-signer"
+          labelSelector:
+            matchLabels:
+              usage: remote-ca
+          path: server-ca.pem
