@@ -1,0 +1,10 @@
+certs/
+*.pem
+*.crt
+*.key
+*.csr
+
+# Binaries
+signer/signer
+server/server
+client/client
