@@ -1,6 +1,6 @@
 # Cross-Cluster mTLS Demo
 
-Demonstrates Kubernetes 1.35 `PodCertificateRequest` and `ClusterTrustBundle` APIs for automated cross-cluster mutual TLS without sidecars or init containers.
+Demonstrates Kubernetes 1.35 `PodCertificateRequest` and `ClusterTrustBundle` APIs for automated cross-cluster mutual TLS without sidecars or init containers. Detailed information can be found at kubernetes [Certificates and Certificate Signing Requests](https://kubernetes.io/docs/reference/access-authn-authz/certificate-signing-requests/) page.
 
 ## Architecture
 
@@ -28,15 +28,15 @@ runtimeConfig:
 
 
 It then generates CA keypairs for each cluster. There are 3 container images to build: the signer controller, the server, and the client.
-The signer controller is deployed to both clusters, while the client and server pods are deployed to `cluster-a` and `cluster-b` respectively. 
-Both server and client pods use `podCertificate` projected volumes to obtain their TLS credentials, and `clusterTrustBundle` projected volumes to obtain the remote CA certificate for verification. 
+The signer controller is deployed to both clusters, while the client and server pods are deployed to `cluster-a` and `cluster-b` respectively.
+Both server and client pods use `podCertificate` projected volumes to obtain their TLS credentials, and `clusterTrustBundle` projected volumes to obtain the remote CA certificate for verification.
 Finally, the client connects to the server over mTLS and verifies successful communication.
 
 ### Pod Certificate Requests
 
-When a pod with a `podCertificate` volume mounts, kubelet generates an ECDSA P-256 keypair and 
-creates a `PodCertificateRequest` (PCR) object. Then the signer controller watches for PCRs, 
-extracts the PKIX public key, issues a certificate with DNS SAN = `<podName>.<namespace>`, 
+When a pod with a `podCertificate` volume mounts, kubelet generates an ECDSA P-256 keypair and
+creates a `PodCertificateRequest` (PCR) object. Then the signer controller watches for PCRs,
+extracts the PKIX public key, issues a certificate with DNS SAN = `<podName>.<namespace>`,
 and writes the PEM-encoded cert chain to `status.certificateChain`. Kubelet detects the issued certificate, mounts it into the pod as a single PEM bundle (private key + cert chain), and refreshes it before expiration.
 
 Server pod (cluster-b):
@@ -60,8 +60,8 @@ volumes:
 
 ### ClusterTrustBundle Distribution
 
-Each cluster holds the other cluster's CA certificate in a signer-linked `ClusterTrustBundle`. 
-Pods project this into their filesystem via `clusterTrustBundle` volume sources, enabling verification of peer certificates 
+Each cluster holds the other cluster's CA certificate in a signer-linked `ClusterTrustBundle`.
+Pods project this into their filesystem via `clusterTrustBundle` volume sources, enabling verification of peer certificates
 signed by the remote CA.
 
 ### Signer Controller
@@ -69,9 +69,9 @@ signed by the remote CA.
 In KEP-4317, the signer controller is needed to implement the signing logic for `PodCertificateRequest` objects, since no built-in signer exists.
 The built-in signers in Kubernetes only support `CertificateRequest` objects, which are cluster-scoped and not designed for the pod-specific use case.
 
-Here in this example, the signer controller watches for `PodCertificateRequest` objects with `signerName: sample.io/mtls-signer`, 
+Here in this example, the signer controller watches for `PodCertificateRequest` objects with `signerName: sample.io/mtls-signer`,
 extracts the PKIX public key, and issues a certificate with DNS SAN = `<podName>.<namespace>`.
-It then sets the required status fields (`certificateChain`, `notBefore`, `notAfter`, `beginRefreshAt`) 
+It then sets the required status fields (`certificateChain`, `notBefore`, `notAfter`, `beginRefreshAt`)
 and condition type `Issued` (or `Denied` on invalid requests).
 
 ## Notes
