@@ -84,32 +84,34 @@ kubectl --context kind-cluster-b -n kube-system wait --for=condition=Available d
 # --- Step 6: Create ClusterTrustBundles (cross-plant CAs) ---
 log_info "--- Step 6: Creating ClusterTrustBundles ---"
 
-# cluster-a gets CA-B (so it trusts the server in cluster-b)
+# cluster-a (client) trusts servers in cluster-b: bundle is keyed to the
+# serving-signer (the signer that issues server certs) and carries CA-B.
 CA_B_PEM=$(cat "$DIR/certs/ca-b.pem")
 cat <<EOF | kubectl --context kind-cluster-a apply -f -
 apiVersion: certificates.k8s.io/v1beta1
 kind: ClusterTrustBundle
 metadata:
-  name: sample.io:mtls-signer:remote-ca
+  name: sample.io:serving-signer:remote-ca
   labels:
     usage: remote-ca
 spec:
-  signerName: "sample.io/mtls-signer"
+  signerName: "sample.io/serving-signer"
   trustBundle: |
 $(echo "$CA_B_PEM" | sed 's/^/    /')
 EOF
 
-# cluster-b gets CA-A (so it trusts clients from cluster-a)
+# cluster-b (server) trusts clients from cluster-a: bundle is keyed to the
+# client-signer (the signer that issues client certs) and carries CA-A.
 CA_A_PEM=$(cat "$DIR/certs/ca-a.pem")
 cat <<EOF | kubectl --context kind-cluster-b apply -f -
 apiVersion: certificates.k8s.io/v1beta1
 kind: ClusterTrustBundle
 metadata:
-  name: sample.io:mtls-signer:remote-ca
+  name: sample.io:client-signer:remote-ca
   labels:
     usage: remote-ca
 spec:
-  signerName: "sample.io/mtls-signer"
+  signerName: "sample.io/client-signer"
   trustBundle: |
 $(echo "$CA_A_PEM" | sed 's/^/    /')
 EOF

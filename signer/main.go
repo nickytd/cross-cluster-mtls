@@ -23,7 +23,28 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-const signerName = "sample.io/mtls-signer"
+// signerConfig describes one logical signer handled by this controller.
+// Splitting serving and client signers narrows each issued certificate to a
+// single ExtKeyUsage and lets pods request a serving-only or client-only cert
+// via the podCertificate projected volume's signerName field.
+type signerConfig struct {
+	name        string
+	extKeyUsage []x509.ExtKeyUsage
+	withDNSSAN  bool
+}
+
+var signers = map[string]signerConfig{
+	"sample.io/serving-signer": {
+		name:        "sample.io/serving-signer",
+		extKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		withDNSSAN:  true,
+	},
+	"sample.io/client-signer": {
+		name:        "sample.io/client-signer",
+		extKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+		withDNSSAN:  false,
+	},
+}
 
 func main() {
 	caKeyFile := os.Getenv("CA_KEY_FILE")
@@ -55,8 +76,16 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	slog.Info("signer controller started", "signerName", signerName)
+	slog.Info("signer controller started", "signers", signerNames())
 	watchAndSign(ctx, client, caKey, caCert)
+}
+
+func signerNames() []string {
+	names := make([]string, 0, len(signers))
+	for n := range signers {
+		names = append(names, n)
+	}
+	return names
 }
 
 func buildConfig() (*rest.Config, error) {
@@ -143,13 +172,14 @@ func doWatch(ctx context.Context, client kubernetes.Interface, caKey *ecdsa.Priv
 			if !ok {
 				continue
 			}
-			if pcr.Spec.SignerName != signerName {
+			cfg, ok := signers[pcr.Spec.SignerName]
+			if !ok {
 				continue
 			}
 			if hasTerminalCondition(pcr) {
 				continue
 			}
-			if err := signPCR(ctx, client, pcr, caKey, caCert); err != nil {
+			if err := signPCR(ctx, client, pcr, caKey, caCert, cfg); err != nil {
 				slog.Error("signing failed", "namespace", pcr.Namespace, "name", pcr.Name, "error", err)
 			}
 		}
@@ -168,7 +198,7 @@ func hasTerminalCondition(pcr *certificatesv1beta1.PodCertificateRequest) bool {
 	return false
 }
 
-func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1beta1.PodCertificateRequest, caKey *ecdsa.PrivateKey, caCert *x509.Certificate) error {
+func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1beta1.PodCertificateRequest, caKey *ecdsa.PrivateKey, caCert *x509.Certificate, cfg signerConfig) error {
 	pubKey, err := x509.ParsePKIXPublicKey(pcr.Spec.PKIXPublicKey)
 	if err != nil {
 		return setDenied(ctx, client, pcr, fmt.Sprintf("bad public key: %v", err))
@@ -194,12 +224,14 @@ func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificates
 			CommonName:   dnsName,
 			Organization: []string{"sample.io"},
 		},
-		DNSNames:              []string{dnsName},
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:           []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+		ExtKeyUsage:           cfg.extKeyUsage,
 		BasicConstraintsValid: true,
+	}
+	if cfg.withDNSSAN {
+		template.DNSNames = []string{dnsName}
 	}
 
 	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, pubKey, caKey)
@@ -220,7 +252,7 @@ func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificates
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
 		Reason:             "Signed",
-		Message:            "Certificate issued by sample signer",
+		Message:            fmt.Sprintf("Certificate issued by %s", cfg.name),
 	})
 
 	_, err = client.CertificatesV1beta1().PodCertificateRequests(pcr.Namespace).UpdateStatus(ctx, pcr, metav1.UpdateOptions{})
@@ -228,7 +260,7 @@ func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificates
 		return fmt.Errorf("updating status: %w", err)
 	}
 
-	slog.Info("issued certificate", "namespace", pcr.Namespace, "name", pcr.Name, "pod", pcr.Spec.PodName, "expires", notAfter.Format(time.RFC3339))
+	slog.Info("issued certificate", "signer", cfg.name, "namespace", pcr.Namespace, "name", pcr.Name, "pod", pcr.Spec.PodName, "expires", notAfter.Format(time.RFC3339))
 	return nil
 }
 

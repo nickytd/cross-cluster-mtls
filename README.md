@@ -36,8 +36,16 @@ Finally, the client connects to the server over mTLS and verifies successful com
 
 When a pod with a `podCertificate` volume mounts, kubelet generates an ECDSA P-256 keypair and
 creates a `PodCertificateRequest` (PCR) object. Then the signer controller watches for PCRs,
-extracts the PKIX public key, issues a certificate with DNS SAN = `<podName>.<namespace>`,
-and writes the PEM-encoded cert chain to `status.certificateChain`. Kubelet detects the issued certificate, mounts it into the pod as a single PEM bundle (private key + cert chain), and refreshes it before expiration.
+extracts the PKIX public key, issues a certificate, and writes the PEM-encoded cert chain
+to `status.certificateChain`. Kubelet detects the issued certificate, mounts it into the pod
+as a single PEM bundle (private key + cert chain), and refreshes it before expiration.
+
+The controller exposes **two signer names** so each pod gets a certificate scoped to its role:
+
+| Signer name | Used by | ExtKeyUsage | DNS SAN |
+| --- | --- | --- | --- |
+| `sample.io/serving-signer` | server pods | `serverAuth` | `<podName>.<namespace>` |
+| `sample.io/client-signer` | client pods | `clientAuth` | none |
 
 Server pod (cluster-b):
 
@@ -47,16 +55,20 @@ volumes:
   projected:
     sources:
     - podCertificate:
-        signerName: "sample.io/mtls-signer"
+        signerName: "sample.io/serving-signer"
         keyType: ECDSAP256
         credentialBundlePath: server-creds.pem
     - clusterTrustBundle:
-        signerName: "sample.io/mtls-signer"
+        signerName: "sample.io/client-signer"
         labelSelector:
           matchLabels:
             usage: remote-ca
         path: client-ca.pem
 ```
+
+The trust bundle's `signerName` names the signer that issued the **peer's** certificate —
+the server reads the bundle keyed to `client-signer` because that bundle holds the CA used
+to verify incoming client certs.
 
 ### ClusterTrustBundle Distribution
 
@@ -69,10 +81,17 @@ signed by the remote CA.
 In KEP-4317, the signer controller is needed to implement the signing logic for `PodCertificateRequest` objects, since no built-in signer exists.
 The built-in signers in Kubernetes only support `CertificateRequest` objects, which are cluster-scoped and not designed for the pod-specific use case.
 
-Here in this example, the signer controller watches for `PodCertificateRequest` objects with `signerName: sample.io/mtls-signer`,
-extracts the PKIX public key, and issues a certificate with DNS SAN = `<podName>.<namespace>`.
-It then sets the required status fields (`certificateChain`, `notBefore`, `notAfter`, `beginRefreshAt`)
-and condition type `Issued` (or `Denied` on invalid requests).
+The `PodCertificateRequest` API has no requester-side field for declaring intended key usage,
+so the signer alone decides what `ExtKeyUsage` to put on each issued cert. To keep each
+certificate narrow, this controller registers two signer names in one binary:
+
+- `sample.io/serving-signer` — `ExtKeyUsage: ServerAuth`, includes `DNSNames`
+- `sample.io/client-signer` — `ExtKeyUsage: ClientAuth`, no SANs
+
+Both names share the same per-cluster CA. The controller watches all PCRs, looks up the
+config by `spec.signerName`, ignores anything it doesn't own, and issues with the matching
+EKU. It also sets the required status fields (`certificateChain`, `notBefore`, `notAfter`,
+`beginRefreshAt`) and condition type `Issued` (or `Denied` on invalid requests).
 
 ## Notes
 
