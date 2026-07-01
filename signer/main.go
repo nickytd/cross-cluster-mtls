@@ -12,11 +12,13 @@ import (
 	"math/big"
 	"os"
 	"os/signal"
+	"slices"
 	"syscall"
 	"time"
 
 	certificatesv1beta1 "k8s.io/api/certificates/v1beta1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -34,10 +36,27 @@ const (
 	signerName    = "sample.io/signer"
 	ekuAnnotation = "sample.io/eku"
 
-	ekuClient  = "client"  // default when the annotation is absent
+	ekuClient  = "client"  // default when the annotation is absent or empty
 	ekuServing = "serving" // serving cert with DNS SAN
 	ekuBoth    = "both"    // client + serving in one cert
 )
+
+// ekuTable maps supported annotation values to their EKU sets. Kept as data so
+// resolveEKU, the deny message, and any docs pull from one source of truth.
+var ekuTable = map[string][]x509.ExtKeyUsage{
+	ekuClient:  {x509.ExtKeyUsageClientAuth},
+	ekuServing: {x509.ExtKeyUsageServerAuth},
+	ekuBoth:    {x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+}
+
+// signer bundles the CA material and the pre-computed CA PEM used for the
+// issued chain, so signPCR does not re-encode the same immutable CA on every
+// request.
+type signer struct {
+	caKey     *ecdsa.PrivateKey
+	caCert    *x509.Certificate
+	caCertPEM []byte
+}
 
 func main() {
 	caKeyFile := os.Getenv("CA_KEY_FILE")
@@ -53,6 +72,12 @@ func main() {
 		os.Exit(1)
 	}
 	slog.Info("loaded CA", "subject", caCert.Subject)
+
+	s := &signer{
+		caKey:     caKey,
+		caCert:    caCert,
+		caCertPEM: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw}),
+	}
 
 	config, err := buildConfig()
 	if err != nil {
@@ -70,7 +95,7 @@ func main() {
 	defer cancel()
 
 	slog.Info("signer controller started", "signer", signerName)
-	watchAndSign(ctx, client, caKey, caCert)
+	s.watchAndSign(ctx, client)
 }
 
 func buildConfig() (*rest.Config, error) {
@@ -123,9 +148,9 @@ func loadCA(keyFile, certFile string) (*ecdsa.PrivateKey, *x509.Certificate, err
 }
 
 // Raw watch is sufficient for illustration purposes; production signers should use a proper controller framework with work queues and retries.
-func watchAndSign(ctx context.Context, client kubernetes.Interface, caKey *ecdsa.PrivateKey, caCert *x509.Certificate) {
+func (s *signer) watchAndSign(ctx context.Context, client kubernetes.Interface) {
 	for {
-		if err := doWatch(ctx, client, caKey, caCert); err != nil {
+		if err := s.doWatch(ctx, client); err != nil {
 			if ctx.Err() != nil {
 				return
 			}
@@ -135,8 +160,14 @@ func watchAndSign(ctx context.Context, client kubernetes.Interface, caKey *ecdsa
 	}
 }
 
-func doWatch(ctx context.Context, client kubernetes.Interface, caKey *ecdsa.PrivateKey, caCert *x509.Certificate) error {
-	watcher, err := client.CertificatesV1beta1().PodCertificateRequests("").Watch(ctx, metav1.ListOptions{})
+func (s *signer) doWatch(ctx context.Context, client kubernetes.Interface) error {
+	// Field selector narrows the watch to PCRs for this signer so events for
+	// other signers on the same cluster are filtered by the apiserver instead
+	// of being decoded and dropped by the loop below.
+	opts := metav1.ListOptions{
+		FieldSelector: fields.OneTermEqualSelector("spec.signerName", signerName).String(),
+	}
+	watcher, err := client.CertificatesV1beta1().PodCertificateRequests("").Watch(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("starting watch: %w", err)
 	}
@@ -157,13 +188,17 @@ func doWatch(ctx context.Context, client kubernetes.Interface, caKey *ecdsa.Priv
 			if !ok {
 				continue
 			}
+			// Defensive check: with the field selector above the apiserver
+			// should never send us the wrong signer, but if the selector was
+			// silently dropped (e.g. downgraded apiserver) this keeps us from
+			// signing PCRs we don't own.
 			if pcr.Spec.SignerName != signerName {
 				continue
 			}
 			if hasTerminalCondition(pcr) {
 				continue
 			}
-			if err := signPCR(ctx, client, pcr, caKey, caCert); err != nil {
+			if err := s.signPCR(ctx, client, pcr); err != nil {
 				slog.Error("signing failed", "namespace", pcr.Namespace, "name", pcr.Name, "error", err)
 			}
 		}
@@ -182,31 +217,37 @@ func hasTerminalCondition(pcr *certificatesv1beta1.PodCertificateRequest) bool {
 	return false
 }
 
-// resolveEKU maps the sample.io/eku annotation to an EKU set. The default is
-// clientAuth; serving certs must opt in explicitly so pods can't grant
-// themselves server identity by accident.
-func resolveEKU(annotations map[string]string) (eku []x509.ExtKeyUsage, withDNSSAN bool, err error) {
-	value, ok := annotations[ekuAnnotation]
-	if !ok {
+// resolveEKU maps spec.unverifiedUserAnnotations to an EKU set.
+//
+// The client EKU is the safe default: absent OR empty annotation both resolve
+// to clientAuth so templating that renders an empty value does not wedge the
+// pod. Serving certs must opt in explicitly. Any other value, or any
+// unrecognized domain-prefixed key, is denied — the API guidance for signers
+// is "deny requests that contain keys they do not recognize."
+func resolveEKU(annotations map[string]string) ([]x509.ExtKeyUsage, error) {
+	for k := range annotations {
+		if k != ekuAnnotation {
+			return nil, fmt.Errorf("unsupported annotation key %q (only %q is recognized)", k, ekuAnnotation)
+		}
+	}
+	value := annotations[ekuAnnotation]
+	if value == "" {
 		value = ekuClient
 	}
-	switch value {
-	case ekuClient:
-		return []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, false, nil
-	case ekuServing:
-		return []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, true, nil
-	case ekuBoth:
-		return []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, true, nil
-	default:
-		return nil, false, fmt.Errorf("unsupported %s=%q (want %q, %q, or %q)", ekuAnnotation, value, ekuClient, ekuServing, ekuBoth)
+	eku, ok := ekuTable[value]
+	if !ok {
+		return nil, fmt.Errorf("unsupported %s=%q (want %q, %q, or %q; delete the pod to retry with a corrected annotation)",
+			ekuAnnotation, value, ekuClient, ekuServing, ekuBoth)
 	}
+	return eku, nil
 }
 
-func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1beta1.PodCertificateRequest, caKey *ecdsa.PrivateKey, caCert *x509.Certificate) error {
-	eku, withDNSSAN, err := resolveEKU(pcr.Spec.UnverifiedUserAnnotations)
+func (s *signer) signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1beta1.PodCertificateRequest) error {
+	eku, err := resolveEKU(pcr.Spec.UnverifiedUserAnnotations)
 	if err != nil {
 		return setDenied(ctx, client, pcr, err.Error())
 	}
+	withDNSSAN := slices.Contains(eku, x509.ExtKeyUsageServerAuth)
 
 	pubKey, err := x509.ParsePKIXPublicKey(pcr.Spec.PKIXPublicKey)
 	if err != nil {
@@ -224,7 +265,10 @@ func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificates
 	now := time.Now()
 	notBefore := now
 	notAfter := now.Add(lifetime)
-	serial, _ := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
+	if err != nil {
+		return fmt.Errorf("generating serial: %w", err)
+	}
 
 	dnsName := fmt.Sprintf("%s.%s", pcr.Spec.PodName, pcr.Namespace)
 	template := &x509.Certificate{
@@ -243,14 +287,15 @@ func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificates
 		template.DNSNames = []string{dnsName}
 	}
 
-	certDER, err := x509.CreateCertificate(rand.Reader, template, caCert, pubKey, caKey)
+	certDER, err := x509.CreateCertificate(rand.Reader, template, s.caCert, pubKey, s.caKey)
 	if err != nil {
 		return fmt.Errorf("creating certificate: %w", err)
 	}
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
-	caCertPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caCert.Raw})
-	chain := string(certPEM) + string(caCertPEM)
+	chain := string(certPEM) + string(s.caCertPEM)
+
+	ekuLabel := annotationValue(pcr.Spec.UnverifiedUserAnnotations)
 
 	pcr.Status.CertificateChain = chain
 	pcr.Status.NotBefore = new(metav1.NewTime(notBefore))
@@ -261,7 +306,7 @@ func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificates
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
 		Reason:             "Signed",
-		Message:            fmt.Sprintf("Certificate issued by %s (eku=%v)", signerName, ekuNames(eku)),
+		Message:            fmt.Sprintf("Certificate issued (eku=%s)", ekuLabel),
 	})
 
 	_, err = client.CertificatesV1beta1().PodCertificateRequests(pcr.Namespace).UpdateStatus(ctx, pcr, metav1.UpdateOptions{})
@@ -273,26 +318,19 @@ func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificates
 		"namespace", pcr.Namespace,
 		"name", pcr.Name,
 		"pod", pcr.Spec.PodName,
-		"eku", ekuNames(eku),
-		"dnsSAN", withDNSSAN,
+		"eku", ekuLabel,
 		"expires", notAfter.Format(time.RFC3339),
 	)
 	return nil
 }
 
-func ekuNames(eku []x509.ExtKeyUsage) []string {
-	names := make([]string, 0, len(eku))
-	for _, u := range eku {
-		switch u {
-		case x509.ExtKeyUsageClientAuth:
-			names = append(names, "clientAuth")
-		case x509.ExtKeyUsageServerAuth:
-			names = append(names, "serverAuth")
-		default:
-			names = append(names, fmt.Sprintf("unknown(%d)", u))
-		}
+// annotationValue returns the user-facing eku value (defaulting to client)
+// used in log fields and condition messages.
+func annotationValue(annotations map[string]string) string {
+	if v := annotations[ekuAnnotation]; v != "" {
+		return v
 	}
-	return names
+	return ekuClient
 }
 
 func setDenied(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1beta1.PodCertificateRequest, reason string) error {

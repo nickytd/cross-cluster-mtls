@@ -87,36 +87,26 @@ log_info "--- Step 6: Creating ClusterTrustBundles ---"
 # One signer name serves both roles now; each cluster publishes the peer's CA
 # under a bundle keyed to sample.io/signer and labeled usage=remote-ca so pods
 # can select it via clusterTrustBundle labelSelector.
+apply_remote_ca_bundle() {
+  local context="$1" ca_file="$2"
+  cat <<EOF | kubectl --context "$context" apply -f -
+apiVersion: certificates.k8s.io/v1beta1
+kind: ClusterTrustBundle
+metadata:
+  name: sample.io:signer:remote-ca
+  labels:
+    usage: remote-ca
+spec:
+  signerName: "sample.io/signer"
+  trustBundle: |
+$(sed 's/^/    /' "$ca_file")
+EOF
+}
 
 # cluster-a (client) trusts servers in cluster-b: carries CA-B.
-CA_B_PEM=$(cat "$DIR/certs/ca-b.pem")
-cat <<EOF | kubectl --context kind-cluster-a apply -f -
-apiVersion: certificates.k8s.io/v1beta1
-kind: ClusterTrustBundle
-metadata:
-  name: sample.io:signer:remote-ca
-  labels:
-    usage: remote-ca
-spec:
-  signerName: "sample.io/signer"
-  trustBundle: |
-$(echo "$CA_B_PEM" | sed 's/^/    /')
-EOF
-
+apply_remote_ca_bundle kind-cluster-a "$DIR/certs/ca-b.pem"
 # cluster-b (server) trusts clients from cluster-a: carries CA-A.
-CA_A_PEM=$(cat "$DIR/certs/ca-a.pem")
-cat <<EOF | kubectl --context kind-cluster-b apply -f -
-apiVersion: certificates.k8s.io/v1beta1
-kind: ClusterTrustBundle
-metadata:
-  name: sample.io:signer:remote-ca
-  labels:
-    usage: remote-ca
-spec:
-  signerName: "sample.io/signer"
-  trustBundle: |
-$(echo "$CA_A_PEM" | sed 's/^/    /')
-EOF
+apply_remote_ca_bundle kind-cluster-b "$DIR/certs/ca-a.pem"
 
 # --- Step 7: Deploy server in cluster-b ---
 CONTEXT=kind-cluster-b NAMESPACE=server "$DIR/server/setup.sh"
