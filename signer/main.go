@@ -23,28 +23,21 @@ import (
 	"k8s.io/client-go/tools/clientcmd"
 )
 
-// signerConfig describes one logical signer handled by this controller.
-// Splitting serving and client signers narrows each issued certificate to a
-// single ExtKeyUsage and lets pods request a serving-only or client-only cert
-// via the podCertificate projected volume's signerName field.
-type signerConfig struct {
-	name        string
-	extKeyUsage []x509.ExtKeyUsage
-	withDNSSAN  bool
-}
+// signerName is the single signer this controller handles.
+//
+// The PodCertificateRequest API has no requester-side field for declaring
+// intended key usage. Rather than splitting into multiple signer names, this
+// controller uses one signer and lets pods opt into a serving role via the
+// ekuAnnotation, which kubelet copies verbatim from
+// podCertificate.userAnnotations into spec.unverifiedUserAnnotations.
+const (
+	signerName    = "sample.io/signer"
+	ekuAnnotation = "sample.io/eku"
 
-var signers = map[string]signerConfig{
-	"sample.io/serving-signer": {
-		name:        "sample.io/serving-signer",
-		extKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
-		withDNSSAN:  true,
-	},
-	"sample.io/client-signer": {
-		name:        "sample.io/client-signer",
-		extKeyUsage: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
-		withDNSSAN:  false,
-	},
-}
+	ekuClient  = "client"  // default when the annotation is absent
+	ekuServing = "serving" // serving cert with DNS SAN
+	ekuBoth    = "both"    // client + serving in one cert
+)
 
 func main() {
 	caKeyFile := os.Getenv("CA_KEY_FILE")
@@ -76,16 +69,8 @@ func main() {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
-	slog.Info("signer controller started", "signers", signerNames())
+	slog.Info("signer controller started", "signer", signerName)
 	watchAndSign(ctx, client, caKey, caCert)
-}
-
-func signerNames() []string {
-	names := make([]string, 0, len(signers))
-	for n := range signers {
-		names = append(names, n)
-	}
-	return names
 }
 
 func buildConfig() (*rest.Config, error) {
@@ -172,14 +157,13 @@ func doWatch(ctx context.Context, client kubernetes.Interface, caKey *ecdsa.Priv
 			if !ok {
 				continue
 			}
-			cfg, ok := signers[pcr.Spec.SignerName]
-			if !ok {
+			if pcr.Spec.SignerName != signerName {
 				continue
 			}
 			if hasTerminalCondition(pcr) {
 				continue
 			}
-			if err := signPCR(ctx, client, pcr, caKey, caCert, cfg); err != nil {
+			if err := signPCR(ctx, client, pcr, caKey, caCert); err != nil {
 				slog.Error("signing failed", "namespace", pcr.Namespace, "name", pcr.Name, "error", err)
 			}
 		}
@@ -198,7 +182,32 @@ func hasTerminalCondition(pcr *certificatesv1beta1.PodCertificateRequest) bool {
 	return false
 }
 
-func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1beta1.PodCertificateRequest, caKey *ecdsa.PrivateKey, caCert *x509.Certificate, cfg signerConfig) error {
+// resolveEKU maps the sample.io/eku annotation to an EKU set. The default is
+// clientAuth; serving certs must opt in explicitly so pods can't grant
+// themselves server identity by accident.
+func resolveEKU(annotations map[string]string) (eku []x509.ExtKeyUsage, withDNSSAN bool, err error) {
+	value, ok := annotations[ekuAnnotation]
+	if !ok {
+		value = ekuClient
+	}
+	switch value {
+	case ekuClient:
+		return []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}, false, nil
+	case ekuServing:
+		return []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, true, nil
+	case ekuBoth:
+		return []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, true, nil
+	default:
+		return nil, false, fmt.Errorf("unsupported %s=%q (want %q, %q, or %q)", ekuAnnotation, value, ekuClient, ekuServing, ekuBoth)
+	}
+}
+
+func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1beta1.PodCertificateRequest, caKey *ecdsa.PrivateKey, caCert *x509.Certificate) error {
+	eku, withDNSSAN, err := resolveEKU(pcr.Spec.UnverifiedUserAnnotations)
+	if err != nil {
+		return setDenied(ctx, client, pcr, err.Error())
+	}
+
 	pubKey, err := x509.ParsePKIXPublicKey(pcr.Spec.PKIXPublicKey)
 	if err != nil {
 		return setDenied(ctx, client, pcr, fmt.Sprintf("bad public key: %v", err))
@@ -227,10 +236,10 @@ func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificates
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:           cfg.extKeyUsage,
+		ExtKeyUsage:           eku,
 		BasicConstraintsValid: true,
 	}
-	if cfg.withDNSSAN {
+	if withDNSSAN {
 		template.DNSNames = []string{dnsName}
 	}
 
@@ -252,7 +261,7 @@ func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificates
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
 		Reason:             "Signed",
-		Message:            fmt.Sprintf("Certificate issued by %s", cfg.name),
+		Message:            fmt.Sprintf("Certificate issued by %s (eku=%v)", signerName, ekuNames(eku)),
 	})
 
 	_, err = client.CertificatesV1beta1().PodCertificateRequests(pcr.Namespace).UpdateStatus(ctx, pcr, metav1.UpdateOptions{})
@@ -260,8 +269,30 @@ func signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificates
 		return fmt.Errorf("updating status: %w", err)
 	}
 
-	slog.Info("issued certificate", "signer", cfg.name, "namespace", pcr.Namespace, "name", pcr.Name, "pod", pcr.Spec.PodName, "expires", notAfter.Format(time.RFC3339))
+	slog.Info("issued certificate",
+		"namespace", pcr.Namespace,
+		"name", pcr.Name,
+		"pod", pcr.Spec.PodName,
+		"eku", ekuNames(eku),
+		"dnsSAN", withDNSSAN,
+		"expires", notAfter.Format(time.RFC3339),
+	)
 	return nil
+}
+
+func ekuNames(eku []x509.ExtKeyUsage) []string {
+	names := make([]string, 0, len(eku))
+	for _, u := range eku {
+		switch u {
+		case x509.ExtKeyUsageClientAuth:
+			names = append(names, "clientAuth")
+		case x509.ExtKeyUsageServerAuth:
+			names = append(names, "serverAuth")
+		default:
+			names = append(names, fmt.Sprintf("unknown(%d)", u))
+		}
+	}
+	return names
 }
 
 func setDenied(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1beta1.PodCertificateRequest, reason string) error {

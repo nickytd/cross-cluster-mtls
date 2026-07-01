@@ -40,12 +40,16 @@ extracts the PKIX public key, issues a certificate, and writes the PEM-encoded c
 to `status.certificateChain`. Kubelet detects the issued certificate, mounts it into the pod
 as a single PEM bundle (private key + cert chain), and refreshes it before expiration.
 
-The controller exposes **two signer names** so each pod gets a certificate scoped to its role:
+The controller exposes a **single signer name** — `sample.io/signer` — and lets
+pods opt into a serving cert via the `sample.io/eku` user annotation, which
+kubelet copies verbatim from `podCertificate.userAnnotations` into
+`spec.unverifiedUserAnnotations` on the PCR:
 
-| Signer name | Used by | ExtKeyUsage | DNS SAN |
+| `sample.io/eku` value | ExtKeyUsage | DNS SAN | Used by |
 | --- | --- | --- | --- |
-| `sample.io/serving-signer` | server pods | `serverAuth` | `<podName>.<namespace>` |
-| `sample.io/client-signer` | client pods | `clientAuth` | none |
+| _absent_ (default) | `clientAuth` | none | client pods |
+| `serving` | `serverAuth` | `<podName>.<namespace>` | server pods |
+| `both` | `clientAuth` + `serverAuth` | `<podName>.<namespace>` | dual-role pods |
 
 Server pod (cluster-b):
 
@@ -55,20 +59,22 @@ volumes:
   projected:
     sources:
     - podCertificate:
-        signerName: "sample.io/serving-signer"
+        signerName: "sample.io/signer"
         keyType: ECDSAP256
         credentialBundlePath: server-creds.pem
+        userAnnotations:
+          sample.io/eku: serving
     - clusterTrustBundle:
-        signerName: "sample.io/client-signer"
+        signerName: "sample.io/signer"
         labelSelector:
           matchLabels:
             usage: remote-ca
         path: client-ca.pem
 ```
 
-The trust bundle's `signerName` names the signer that issued the **peer's** certificate —
-the server reads the bundle keyed to `client-signer` because that bundle holds the CA used
-to verify incoming client certs.
+The client pod is identical minus the `userAnnotations` block, so it gets the
+default `clientAuth` cert. The trust bundle carries the peer cluster's CA and
+is selected by the `usage: remote-ca` label rather than by signer name.
 
 ### ClusterTrustBundle Distribution
 
@@ -81,17 +87,22 @@ signed by the remote CA.
 In KEP-4317, the signer controller is needed to implement the signing logic for `PodCertificateRequest` objects, since no built-in signer exists.
 The built-in signers in Kubernetes only support `CertificateRequest` objects, which are cluster-scoped and not designed for the pod-specific use case.
 
-The `PodCertificateRequest` API has no requester-side field for declaring intended key usage,
-so the signer alone decides what `ExtKeyUsage` to put on each issued cert. To keep each
-certificate narrow, this controller registers two signer names in one binary:
+The `PodCertificateRequest` API has no requester-side field for declaring intended
+key usage, so the signer alone decides what `ExtKeyUsage` to put on each issued
+cert. This controller keeps a single signer name (`sample.io/signer`) and reads
+`spec.unverifiedUserAnnotations["sample.io/eku"]` — which kubelet copies from
+`podCertificate.userAnnotations` — to select the EKU:
 
-- `sample.io/serving-signer` — `ExtKeyUsage: ServerAuth`, includes `DNSNames`
-- `sample.io/client-signer` — `ExtKeyUsage: ClientAuth`, no SANs
+- absent → `ExtKeyUsage: ClientAuth`, no SANs (safe default)
+- `serving` → `ExtKeyUsage: ServerAuth`, includes `DNSNames`
+- `both` → `ExtKeyUsage: ClientAuth + ServerAuth`, includes `DNSNames`
+- any other value → PCR is denied with `InvalidRequest`
 
-Both names share the same per-cluster CA. The controller watches all PCRs, looks up the
-config by `spec.signerName`, ignores anything it doesn't own, and issues with the matching
-EKU. It also sets the required status fields (`certificateChain`, `notBefore`, `notAfter`,
-`beginRefreshAt`) and condition type `Issued` (or `Denied` on invalid requests).
+Client is the default so a pod cannot grant itself server identity by accident.
+Because `unverifiedUserAnnotations` is unauthenticated, treat this as a
+convenience for the demo — production signers should authorize the requesting
+pod (via `spec.serviceAccountName` / `spec.podName`) before honoring
+`serving` or `both`.
 
 ## Notes
 

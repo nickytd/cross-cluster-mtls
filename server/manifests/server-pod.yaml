@@ -28,11 +28,13 @@ spec:
     projected:
       sources:
       - podCertificate:
-          signerName: "sample.io/serving-signer"
+          signerName: "sample.io/signer"
           keyType: ECDSAP256
           credentialBundlePath: server-creds.pem
+          userAnnotations:
+            sample.io/eku: serving
       - clusterTrustBundle:
-          signerName: "sample.io/client-signer"
+          signerName: "sample.io/signer"
           labelSelector:
             matchLabels:
               usage: remote-ca
