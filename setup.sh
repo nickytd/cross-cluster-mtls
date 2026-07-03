@@ -88,7 +88,12 @@ log_info "--- Step 6: Creating ClusterTrustBundles ---"
 # under a bundle keyed to sample.io/signer and labeled usage=remote-ca so pods
 # can select it via clusterTrustBundle labelSelector.
 apply_remote_ca_bundle() {
-  local context="$1" ca_file="$2"
+  local context="$1" ca_file="$2" ca_pem
+  # Read the file into a local before the heredoc so a missing/unreadable file
+  # aborts under `set -euo pipefail`. Command substitution inside a heredoc
+  # does not inherit errexit, so `$(sed ... "$ca_file")` there would silently
+  # emit an empty trustBundle.
+  ca_pem=$(cat "$ca_file")
   cat <<EOF | kubectl --context "$context" apply -f -
 apiVersion: certificates.k8s.io/v1beta1
 kind: ClusterTrustBundle
@@ -99,7 +104,7 @@ metadata:
 spec:
   signerName: "sample.io/signer"
   trustBundle: |
-$(sed 's/^/    /' "$ca_file")
+$(echo "$ca_pem" | sed 's/^/    /')
 EOF
 }
 
