@@ -61,21 +61,30 @@ kind load docker-image sample-server:local --name cluster-b
 # --- Step 5: Deploy signer to both clusters ---
 log_info "--- Step 5: Deploying signer controller ---"
 
+# Kubernetes does not restart pods when a mounted Secret changes, so we stamp
+# a sha256 of the CA key+cert into the pod template. When the CAs are
+# regenerated the annotation flips and `kubectl apply` triggers a rolling
+# restart, keeping the signer's in-memory CA in sync with the on-disk one
+# (and, transitively, with the ClusterTrustBundle applied in Step 6).
+deploy_signer() {
+  local context="$1" ca_cert="$2" ca_key="$3" checksum
+  checksum=$(cat "$ca_cert" "$ca_key" | shasum -a 256 | awk '{print $1}')
+  kubectl --context "$context" -n kube-system create secret tls signer-ca \
+    --cert="$ca_cert" --key="$ca_key" --dry-run=client -o yaml | \
+    kubectl --context "$context" apply -f -
+  sed "s/CA_CHECKSUM_PLACEHOLDER/$checksum/" "$DIR/signer/manifests/signer-deploy.yaml" | \
+    kubectl --context "$context" -n kube-system apply -f -
+}
+
 # cluster-a: signer with CA-A (namespace: kube-system)
 kubectl --context kind-cluster-a create namespace client --dry-run=client -o yaml | kubectl --context kind-cluster-a apply -f -
 sed "s/NS_PLACEHOLDER/kube-system/" "$DIR/signer/manifests/signer-rbac.yaml" | kubectl --context kind-cluster-a -n kube-system apply -f -
-kubectl --context kind-cluster-a -n kube-system create secret tls signer-ca \
-  --cert="$DIR/certs/ca-a.pem" --key="$DIR/certs/ca-a-key.pem" --dry-run=client -o yaml | \
-  kubectl --context kind-cluster-a apply -f -
-kubectl --context kind-cluster-a -n kube-system apply -f "$DIR/signer/manifests/signer-deploy.yaml"
+deploy_signer kind-cluster-a "$DIR/certs/ca-a.pem" "$DIR/certs/ca-a-key.pem"
 
 # cluster-b: signer with CA-B (namespace: kube-system)
 kubectl --context kind-cluster-b create namespace server --dry-run=client -o yaml | kubectl --context kind-cluster-b apply -f -
 sed "s/NS_PLACEHOLDER/kube-system/" "$DIR/signer/manifests/signer-rbac.yaml" | kubectl --context kind-cluster-b -n kube-system apply -f -
-kubectl --context kind-cluster-b -n kube-system create secret tls signer-ca \
-  --cert="$DIR/certs/ca-b.pem" --key="$DIR/certs/ca-b-key.pem" --dry-run=client -o yaml | \
-  kubectl --context kind-cluster-b apply -f -
-kubectl --context kind-cluster-b -n kube-system apply -f "$DIR/signer/manifests/signer-deploy.yaml"
+deploy_signer kind-cluster-b "$DIR/certs/ca-b.pem" "$DIR/certs/ca-b-key.pem"
 
 log_debug "Waiting for signer pods..."
 kubectl --context kind-cluster-a -n kube-system wait --for=condition=Available deployment/signer --timeout=60s

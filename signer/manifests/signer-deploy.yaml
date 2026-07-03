@@ -11,6 +11,12 @@ spec:
     metadata:
       labels:
         app: signer
+      annotations:
+        # Substituted by setup.sh with the sha256 of the CA key+cert files.
+        # Kubernetes does not restart pods when a mounted Secret changes, so
+        # bumping this annotation on every apply forces a rolling restart
+        # whenever the CA material has actually changed.
+        sample.io/ca-checksum: "CA_CHECKSUM_PLACEHOLDER"
     spec:
       serviceAccountName: signer
       containers:
