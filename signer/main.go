@@ -9,6 +9,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"maps"
 	"math/big"
 	"os"
 	"os/signal"
@@ -41,12 +42,22 @@ const (
 	ekuBoth    = "both"    // client + serving in one cert
 )
 
-// ekuTable maps supported annotation values to their EKU sets. Kept as data so
-// resolveEKU, the deny message, and any docs pull from one source of truth.
-var ekuTable = map[string][]x509.ExtKeyUsage{
-	ekuClient:  {x509.ExtKeyUsageClientAuth},
-	ekuServing: {x509.ExtKeyUsageServerAuth},
-	ekuBoth:    {x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth},
+// ekuTable maps supported annotation values to the cert policy they select.
+// Kept as data so resolveEKU and the deny message pull from one source of
+// truth: adding a new role means adding an entry here, nothing else.
+var ekuTable = map[string]ekuPolicy{
+	ekuClient:  {eku: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}},
+	ekuServing: {eku: []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}, withDNSSAN: true},
+	ekuBoth:    {eku: []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth, x509.ExtKeyUsageServerAuth}, withDNSSAN: true},
+}
+
+// ekuPolicy is the cert policy an ekuAnnotation value selects. Keeping
+// withDNSSAN adjacent to the EKU set means SAN policy is not silently derived
+// from "does this set contain ServerAuth?" — a future entry with ServerAuth
+// but no DNS SAN (or a DNS-SAN'd client cert) stays declarative here.
+type ekuPolicy struct {
+	eku        []x509.ExtKeyUsage
+	withDNSSAN bool
 }
 
 // signer bundles the CA material and the pre-computed CA PEM used for the
@@ -217,37 +228,48 @@ func hasTerminalCondition(pcr *certificatesv1beta1.PodCertificateRequest) bool {
 	return false
 }
 
-// resolveEKU maps spec.unverifiedUserAnnotations to an EKU set.
+// resolveEKU maps spec.unverifiedUserAnnotations to a cert policy plus the
+// user-facing label used in logs and the Issued condition.
 //
 // The client EKU is the safe default: absent OR empty annotation both resolve
 // to clientAuth so templating that renders an empty value does not wedge the
 // pod. Serving certs must opt in explicitly. Any other value, or any
 // unrecognized domain-prefixed key, is denied — the API guidance for signers
 // is "deny requests that contain keys they do not recognize."
-func resolveEKU(annotations map[string]string) ([]x509.ExtKeyUsage, error) {
+func resolveEKU(annotations map[string]string) (ekuPolicy, string, error) {
+	// Collect every unrecognized key, sort, and report together so the deny
+	// reason is stable across map-iteration order (and across signer restarts
+	// on the same PCR).
+	var unknown []string
 	for k := range annotations {
 		if k != ekuAnnotation {
-			return nil, fmt.Errorf("unsupported annotation key %q (only %q is recognized)", k, ekuAnnotation)
+			unknown = append(unknown, k)
 		}
 	}
-	value := annotations[ekuAnnotation]
-	if value == "" {
-		value = ekuClient
+	if len(unknown) > 0 {
+		slices.Sort(unknown)
+		return ekuPolicy{}, "", fmt.Errorf("unsupported annotation key(s) %q (only %q is recognized)", unknown, ekuAnnotation)
 	}
-	eku, ok := ekuTable[value]
+	label := annotations[ekuAnnotation]
+	if label == "" {
+		label = ekuClient
+	}
+	policy, ok := ekuTable[label]
 	if !ok {
-		return nil, fmt.Errorf("unsupported %s=%q (want %q, %q, or %q; delete the pod to retry with a corrected annotation)",
-			ekuAnnotation, value, ekuClient, ekuServing, ekuBoth)
+		// Derive the accepted-values list from ekuTable so adding a role stays
+		// a one-line data change.
+		want := slices.Sorted(maps.Keys(ekuTable))
+		return ekuPolicy{}, "", fmt.Errorf("unsupported %s=%q (want one of %q; delete the pod to retry with a corrected annotation)",
+			ekuAnnotation, label, want)
 	}
-	return eku, nil
+	return policy, label, nil
 }
 
 func (s *signer) signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1beta1.PodCertificateRequest) error {
-	eku, err := resolveEKU(pcr.Spec.UnverifiedUserAnnotations)
+	policy, ekuLabel, err := resolveEKU(pcr.Spec.UnverifiedUserAnnotations)
 	if err != nil {
 		return setDenied(ctx, client, pcr, err.Error())
 	}
-	withDNSSAN := slices.Contains(eku, x509.ExtKeyUsageServerAuth)
 
 	pubKey, err := x509.ParsePKIXPublicKey(pcr.Spec.PKIXPublicKey)
 	if err != nil {
@@ -280,10 +302,10 @@ func (s *signer) signPCR(ctx context.Context, client kubernetes.Interface, pcr *
 		NotBefore:             notBefore,
 		NotAfter:              notAfter,
 		KeyUsage:              x509.KeyUsageDigitalSignature | x509.KeyUsageKeyEncipherment,
-		ExtKeyUsage:           eku,
+		ExtKeyUsage:           policy.eku,
 		BasicConstraintsValid: true,
 	}
-	if withDNSSAN {
+	if policy.withDNSSAN {
 		template.DNSNames = []string{dnsName}
 	}
 
@@ -294,8 +316,6 @@ func (s *signer) signPCR(ctx context.Context, client kubernetes.Interface, pcr *
 
 	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: certDER})
 	chain := string(certPEM) + string(s.caCertPEM)
-
-	ekuLabel := annotationValue(pcr.Spec.UnverifiedUserAnnotations)
 
 	pcr.Status.CertificateChain = chain
 	pcr.Status.NotBefore = new(metav1.NewTime(notBefore))
@@ -322,15 +342,6 @@ func (s *signer) signPCR(ctx context.Context, client kubernetes.Interface, pcr *
 		"expires", notAfter.Format(time.RFC3339),
 	)
 	return nil
-}
-
-// annotationValue returns the user-facing eku value (defaulting to client)
-// used in log fields and condition messages.
-func annotationValue(annotations map[string]string) string {
-	if v := annotations[ekuAnnotation]; v != "" {
-		return v
-	}
-	return ekuClient
 }
 
 func setDenied(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1beta1.PodCertificateRequest, reason string) error {
