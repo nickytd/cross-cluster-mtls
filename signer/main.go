@@ -268,7 +268,7 @@ func resolveEKU(annotations map[string]string) (ekuPolicy, string, error) {
 func (s *signer) signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1.PodCertificateRequest) error {
 	policy, ekuLabel, err := resolveEKU(pcr.Spec.UnverifiedUserAnnotations)
 	if err != nil {
-		return setDenied(ctx, client, pcr, err.Error())
+		return setDenied(ctx, client, pcr, "InvalidRequest", err.Error())
 	}
 
 	// In the v1 GA API kubelet no longer sends a bare public key; it sends a
@@ -277,9 +277,17 @@ func (s *signer) signPCR(ctx context.Context, client kubernetes.Interface, pcr *
 	// signature at admission, so we do not re-check it here.
 	csr, err := x509.ParseCertificateRequest(pcr.Spec.StubPKCS10Request)
 	if err != nil {
-		return setDenied(ctx, client, pcr, fmt.Sprintf("bad stub CSR: %v", err))
+		return setDenied(ctx, client, pcr, "InvalidRequest", fmt.Sprintf("bad stub CSR: %v", err))
 	}
-	pubKey := csr.PublicKey
+
+	// This signer issues from an ECDSA CA and only supports ECDSA subject keys.
+	// The v1 API contract says to deny unsupported key types with reason
+	// "UnsupportedKeyType" rather than failing issuance with a generic error.
+	pubKey, ok := csr.PublicKey.(*ecdsa.PublicKey)
+	if !ok {
+		return setDenied(ctx, client, pcr, "UnsupportedKeyType",
+			fmt.Sprintf("unsupported key type %T (this signer supports ECDSA, e.g. ECDSAP256)", csr.PublicKey))
+	}
 
 	lifetime := 24 * time.Hour
 	if pcr.Spec.MaxExpirationSeconds != nil && *pcr.Spec.MaxExpirationSeconds > 0 {
@@ -349,13 +357,13 @@ func (s *signer) signPCR(ctx context.Context, client kubernetes.Interface, pcr *
 	return nil
 }
 
-func setDenied(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1.PodCertificateRequest, reason string) error {
+func setDenied(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1.PodCertificateRequest, reason, message string) error {
 	pcr.Status.Conditions = append(pcr.Status.Conditions, metav1.Condition{
 		Type:               certificatesv1.PodCertificateRequestConditionTypeDenied,
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
-		Reason:             "InvalidRequest",
-		Message:            reason,
+		Reason:             reason,
+		Message:            message,
 	})
 	_, err := client.CertificatesV1().PodCertificateRequests(pcr.Namespace).UpdateStatus(ctx, pcr, metav1.UpdateOptions{})
 	return err
