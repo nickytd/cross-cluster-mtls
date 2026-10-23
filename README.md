@@ -21,7 +21,6 @@ needed:
 - `ClusterTrustBundle` — the `ClusterTrustBundle` API
 - `ClusterTrustBundleProjection` — `clusterTrustBundle` projected volume sources
 
-
 It then generates CA keypairs for each cluster. There are 3 container images to build: the signer controller, the server, and the client.
 The signer controller is deployed to both clusters, while the client and server pods are deployed to `cluster-a` and `cluster-b` respectively.
 Both server and client pods use `podCertificate` projected volumes to obtain their TLS credentials, and `clusterTrustBundle` projected volumes to obtain the remote CA certificate for verification.
@@ -75,9 +74,10 @@ is selected by the `usage: remote-ca` label rather than by signer name.
 
 ### ClusterTrustBundle Distribution
 
-Each cluster holds the other cluster's CA certificate in a signer-linked `ClusterTrustBundle`.
-Pods project this into their filesystem via `clusterTrustBundle` volume sources, enabling verification of peer certificates
-signed by the remote CA.
+Each cluster holds the other cluster's CA certificate in a `ClusterTrustBundle`
+labeled `usage: remote-ca`. Pods project this into their filesystem via
+`clusterTrustBundle` volume sources — selecting it by that label — enabling
+verification of peer certificates signed by the remote CA.
 
 ### Signer Controller
 
