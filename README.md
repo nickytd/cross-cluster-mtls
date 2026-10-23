@@ -12,6 +12,13 @@ Demonstrates Kubernetes 1.37 `PodCertificateRequest` and `ClusterTrustBundle` AP
 ./setup.sh
 ```
 
+A `Makefile` wraps the common tasks (`make help` lists them): `make up` / `make down`
+alias the setup/clean scripts, `make build vet lint` (or `make check`) runs the
+same build/vet/shellcheck gate CI enforces, and `make images` builds the three
+container images. CI (`.github/workflows/build.yml`) runs that gate and builds
+the images on every push and PR — it does not push images to a registry, since
+the demo loads them into kind locally.
+
 This sample script spins up 2 kind clusters on `kindest/node:v1.37.0`. The
 three APIs this demo relies on graduated to GA in Kubernetes 1.37 and are
 enabled by default, so no `featureGates` or `runtimeConfig` overrides are
