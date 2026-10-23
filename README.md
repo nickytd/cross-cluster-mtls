@@ -6,12 +6,6 @@ Demonstrates Kubernetes 1.37 `PodCertificateRequest` and `ClusterTrustBundle` AP
 
 ![cross-cluster-mtls.png](images/cross-cluster-mtls.png)
 
-The diagram is authored as code in [`images/cross-cluster-mtls.d2`](images/cross-cluster-mtls.d2). Regenerate the PNG with [D2](https://d2lang.com) (ELK layout is pinned in the file):
-
-```bash
-d2 images/cross-cluster-mtls.d2 images/cross-cluster-mtls.png
-```
-
 ## Quick Start
 
 ```bash
