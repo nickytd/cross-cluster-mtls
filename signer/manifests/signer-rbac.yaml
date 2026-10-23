@@ -8,22 +8,21 @@ kind: ClusterRole
 metadata:
   name: sample-signer
 rules:
+# The controller watches PCRs and reports results via the status subresource.
+# It does not mutate the PCR spec, so no `update` on the main resource.
 - apiGroups: ["certificates.k8s.io"]
   resources: ["podcertificaterequests"]
-  verbs: ["get", "list", "watch", "update"]
+  verbs: ["get", "list", "watch"]
 - apiGroups: ["certificates.k8s.io"]
   resources: ["podcertificaterequests/status"]
   verbs: ["update"]
-- apiGroups: ["certificates.k8s.io"]
-  resources: ["clustertrustbundles"]
-  verbs: ["create", "get", "list", "watch", "update", "delete"]
+# `sign` is the apiserver's authorization gate: it rejects an issued chain
+# unless the status updater holds `sign` on the signer name. ClusterTrustBundles
+# are created by setup.sh (not this controller), so no CTB verbs are needed.
 - apiGroups: ["certificates.k8s.io"]
   resources: ["signers"]
   resourceNames: ["sample.io/*"]
-  verbs: ["sign", "attest"]
-- apiGroups: [""]
-  resources: ["events"]
-  verbs: ["create"]
+  verbs: ["sign"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
