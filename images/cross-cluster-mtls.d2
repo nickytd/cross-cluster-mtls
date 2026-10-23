@@ -11,17 +11,18 @@ direction: right
 vars: {
   d2-config: {
     layout-engine: elk
+    theme-id: 200
     pad: 40
-    sketch: true
+    sketch: false
   }
 }
 
 classes: {
   signer-a: {
-    style: { stroke: "#2e7d32"; font-color: "#2e7d32"; stroke-width: 2; border-radius: 6 }
+    style: { stroke: "#4caf50"; font-color: "#4caf50"; stroke-width: 2; border-radius: 6 }
   }
   signer-b: {
-    style: { stroke: "#1565c0"; font-color: "#1565c0"; stroke-width: 2; border-radius: 6 }
+    style: { stroke: "#42a5f5"; font-color: "#42a5f5"; stroke-width: 2; border-radius: 6 }
   }
   pod: {
     style: { stroke-width: 2; border-radius: 6 }
@@ -63,8 +64,8 @@ cluster_a.client -> cluster_b.server: mTLS {
 # Cross-cluster trust via ClusterTrustBundle (dotted, colored by CA).
 # Cluster A trusts CA-B; Cluster B trusts CA-A.
 cluster_a.client -> cluster_b.signer_b: "trusts CA-B" {
-  style: { stroke-dash: 3; stroke: "#1565c0"; font-color: "#1565c0" }
+  style: { stroke-dash: 3; stroke: "#42a5f5"; font-color: "#42a5f5" }
 }
 cluster_b.server -> cluster_a.signer_a: "trusts CA-A" {
-  style: { stroke-dash: 3; stroke: "#2e7d32"; font-color: "#2e7d32" }
+  style: { stroke-dash: 3; stroke: "#4caf50"; font-color: "#4caf50" }
 }
