@@ -114,3 +114,7 @@ pod (via `spec.serviceAccountName` / `spec.podName`) before honoring
 - Kubelet uses exponential backoff on volume mount failures, so pods may take 2-4 minutes to start after the certificate is issued
 - The reference signer implementation from the KEP authors is at [ahmedtd/mesh-example](https://github.com/ahmedtd/mesh-example)
 - At GA (`certificates.k8s.io/v1`, K8s 1.37) `PodCertificateRequest` carries the public key via `spec.stubPKCS10Request` — a DER-encoded PKCS#10 stub CSR. The signer extracts the subject public key from it; the apiserver verifies the CSR signature at admission. The earlier `v1beta1` API used `spec.pkixPublicKey`, which was removed at GA.
+
+## License
+
+Licensed under the [Apache License 2.0](LICENSE).
