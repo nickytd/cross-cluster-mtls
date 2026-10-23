@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Niki Dokovski
+// SPDX-License-Identifier: Apache-2.0
+
 package main
 
 import (
