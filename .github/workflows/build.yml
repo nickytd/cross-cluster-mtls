@@ -1,0 +1,55 @@
+name: build
+
+# Build and validate on every push and PR. This does not push images anywhere —
+# the demo loads images into kind locally (imagePullPolicy: Never), so CI only
+# proves the Go code builds/vets, the scripts are shellcheck-clean, and the
+# container images build successfully.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+          cache-dependency-path: signer/go.sum
+
+      - name: go build & vet
+        run: |
+          for m in signer server client; do
+            echo "::group::$m"
+            (cd "$m" && CGO_ENABLED=0 go build ./... && go vet ./...)
+            echo "::endgroup::"
+          done
+
+      - name: gofmt
+        run: |
+          out=$(gofmt -l signer server client)
+          if [ -n "$out" ]; then echo "needs gofmt:"; echo "$out"; exit 1; fi
+
+      - name: shellcheck
+        run: shellcheck setup.sh clean.sh server/setup.sh client/setup.sh
+
+  images:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: build images
+        run: |
+          for i in signer server client; do
+            echo "::group::sample-$i:local"
+            docker build -t "sample-$i:local" "./$i"
+            echo "::endgroup::"
+          done
