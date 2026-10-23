@@ -19,7 +19,7 @@ log_debug "Waiting for client pod (may take up to 5 minutes due to kubelet backo
 kubectl --context "$CONTEXT" -n "$NAMESPACE" wait --for=condition=Ready pod/mtls-client --timeout=300s
 
 log_debug "Waiting for client to complete at least 2 successful requests..."
-for i in $(seq 1 30); do
+for _ in $(seq 1 30); do
   count=$(kubectl --context "$CONTEXT" -n "$NAMESPACE" logs mtls-client 2>/dev/null | grep -c "status=200" || true)
   if [ "$count" -ge 2 ]; then
     break

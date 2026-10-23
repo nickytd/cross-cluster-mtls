@@ -113,7 +113,11 @@ metadata:
 spec:
   signerName: "sample.io/signer"
   trustBundle: |
-$(echo "$ca_pem" | sed 's/^/    /')
+$(
+    # Indent every PEM line by 4 spaces to sit under the block scalar.
+    # shellcheck disable=SC2001  # per-line prefix across newlines; ${//} can't do this cleanly
+    echo "$ca_pem" | sed 's/^/    /'
+)
 EOF
 }
 
@@ -128,7 +132,10 @@ CONTEXT=kind-cluster-b NAMESPACE=server "$DIR/server/setup.sh"
 # --- Step 8: Get cluster-b control-plane IP for cross-cluster access ---
 log_info "--- Resolving cluster-b IP for client ---"
 
-CLUSTER_B_IP=$(docker inspect -f '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}' cluster-b-control-plane)
+# Pull the IP from the "kind" docker network specifically. Ranging over all
+# networks would concatenate IPs without a separator if the container is ever
+# attached to a second network.
+CLUSTER_B_IP=$(docker inspect -f '{{(index .NetworkSettings.Networks "kind").IPAddress}}' cluster-b-control-plane)
 log_debug "cluster-b control-plane IP: $CLUSTER_B_IP"
 
 # --- Step 9: Deploy client in cluster-a ---
