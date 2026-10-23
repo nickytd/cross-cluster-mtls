@@ -12,13 +12,7 @@ Demonstrates Kubernetes 1.37 `PodCertificateRequest` and `ClusterTrustBundle` AP
 ./setup.sh
 ```
 
-This sample script spins up 2 kind clusters demonstrating mTLS Client/Server communication.
-
-- `PodCertificateRequest` — the `PodCertificateRequest` API and kubelet volume plugin
-- `ClusterTrustBundle` — the `ClusterTrustBundle` API
-- `ClusterTrustBundleProjection` — `clusterTrustBundle` projected volume sources
-
-It then generates CA keypairs for each cluster. There are 3 container images to build: the signer controller, the server, and the client.
+This sample script spins up 2 kind clusters demonstrating mTLS Client/Server communication. It generates CA keypairs for each cluster. There are 3 container images to build: the signer controller, the server, and the client.
 The signer controller is deployed to both clusters, while the client and server pods are deployed to `cluster-a` and `cluster-b` respectively.
 Both server and client pods use `podCertificate` projected volumes to obtain their TLS credentials, and `clusterTrustBundle` projected volumes to obtain the remote CA certificate for verification.
 Finally, the client connects to the server over mTLS and verifies successful communication.
