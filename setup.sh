@@ -9,7 +9,7 @@ log_info() { printf "\033[1;34m[INFO]\033[0m %s\n" "$*"; }
 log_debug() { printf "\033[0;37m[DEBUG]\033[0m %s\n" "$*"; }
 
 log_info "=== Cross-Cluster mTLS ==="
-log_info "Using PodCertificateRequest + ClusterTrustBundle on kind (K8s 1.35)"
+log_info "Using PodCertificateRequest + ClusterTrustBundle on kind (K8s 1.37)"
 
 # --- Step 1: Create kind clusters ---
 log_info "--- Step 1: Creating kind clusters ---"
@@ -104,7 +104,7 @@ apply_remote_ca_bundle() {
   # emit an empty trustBundle.
   ca_pem=$(cat "$ca_file")
   cat <<EOF | kubectl --context "$context" apply -f -
-apiVersion: certificates.k8s.io/v1beta1
+apiVersion: certificates.k8s.io/v1
 kind: ClusterTrustBundle
 metadata:
   name: sample.io:signer:remote-ca

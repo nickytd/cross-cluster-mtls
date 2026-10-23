@@ -17,7 +17,7 @@ import (
 	"syscall"
 	"time"
 
-	certificatesv1beta1 "k8s.io/api/certificates/v1beta1"
+	certificatesv1 "k8s.io/api/certificates/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/fields"
 	"k8s.io/apimachinery/pkg/watch"
@@ -178,7 +178,7 @@ func (s *signer) doWatch(ctx context.Context, client kubernetes.Interface) error
 	opts := metav1.ListOptions{
 		FieldSelector: fields.OneTermEqualSelector("spec.signerName", signerName).String(),
 	}
-	watcher, err := client.CertificatesV1beta1().PodCertificateRequests("").Watch(ctx, opts)
+	watcher, err := client.CertificatesV1().PodCertificateRequests("").Watch(ctx, opts)
 	if err != nil {
 		return fmt.Errorf("starting watch: %w", err)
 	}
@@ -195,7 +195,7 @@ func (s *signer) doWatch(ctx context.Context, client kubernetes.Interface) error
 			if event.Type != watch.Added && event.Type != watch.Modified {
 				continue
 			}
-			pcr, ok := event.Object.(*certificatesv1beta1.PodCertificateRequest)
+			pcr, ok := event.Object.(*certificatesv1.PodCertificateRequest)
 			if !ok {
 				continue
 			}
@@ -216,12 +216,12 @@ func (s *signer) doWatch(ctx context.Context, client kubernetes.Interface) error
 	}
 }
 
-func hasTerminalCondition(pcr *certificatesv1beta1.PodCertificateRequest) bool {
+func hasTerminalCondition(pcr *certificatesv1.PodCertificateRequest) bool {
 	for _, c := range pcr.Status.Conditions {
 		switch c.Type {
-		case certificatesv1beta1.PodCertificateRequestConditionTypeIssued,
-			certificatesv1beta1.PodCertificateRequestConditionTypeDenied,
-			certificatesv1beta1.PodCertificateRequestConditionTypeFailed:
+		case certificatesv1.PodCertificateRequestConditionTypeIssued,
+			certificatesv1.PodCertificateRequestConditionTypeDenied,
+			certificatesv1.PodCertificateRequestConditionTypeFailed:
 			return true
 		}
 	}
@@ -265,16 +265,21 @@ func resolveEKU(annotations map[string]string) (ekuPolicy, string, error) {
 	return policy, label, nil
 }
 
-func (s *signer) signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1beta1.PodCertificateRequest) error {
+func (s *signer) signPCR(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1.PodCertificateRequest) error {
 	policy, ekuLabel, err := resolveEKU(pcr.Spec.UnverifiedUserAnnotations)
 	if err != nil {
 		return setDenied(ctx, client, pcr, err.Error())
 	}
 
-	pubKey, err := x509.ParsePKIXPublicKey(pcr.Spec.PKIXPublicKey)
+	// In the v1 GA API kubelet no longer sends a bare public key; it sends a
+	// DER-encoded PKCS#10 stub CSR built with the subject private key. We only
+	// need the embedded public key — the apiserver already verified the CSR
+	// signature at admission, so we do not re-check it here.
+	csr, err := x509.ParseCertificateRequest(pcr.Spec.StubPKCS10Request)
 	if err != nil {
-		return setDenied(ctx, client, pcr, fmt.Sprintf("bad public key: %v", err))
+		return setDenied(ctx, client, pcr, fmt.Sprintf("bad stub CSR: %v", err))
 	}
+	pubKey := csr.PublicKey
 
 	lifetime := 24 * time.Hour
 	if pcr.Spec.MaxExpirationSeconds != nil && *pcr.Spec.MaxExpirationSeconds > 0 {
@@ -322,14 +327,14 @@ func (s *signer) signPCR(ctx context.Context, client kubernetes.Interface, pcr *
 	pcr.Status.NotAfter = new(metav1.NewTime(notAfter))
 	pcr.Status.BeginRefreshAt = new(metav1.NewTime(now.Add(lifetime * 2 / 3)))
 	pcr.Status.Conditions = append(pcr.Status.Conditions, metav1.Condition{
-		Type:               certificatesv1beta1.PodCertificateRequestConditionTypeIssued,
+		Type:               certificatesv1.PodCertificateRequestConditionTypeIssued,
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
 		Reason:             "Signed",
 		Message:            fmt.Sprintf("Certificate issued (eku=%s)", ekuLabel),
 	})
 
-	_, err = client.CertificatesV1beta1().PodCertificateRequests(pcr.Namespace).UpdateStatus(ctx, pcr, metav1.UpdateOptions{})
+	_, err = client.CertificatesV1().PodCertificateRequests(pcr.Namespace).UpdateStatus(ctx, pcr, metav1.UpdateOptions{})
 	if err != nil {
 		return fmt.Errorf("updating status: %w", err)
 	}
@@ -344,14 +349,14 @@ func (s *signer) signPCR(ctx context.Context, client kubernetes.Interface, pcr *
 	return nil
 }
 
-func setDenied(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1beta1.PodCertificateRequest, reason string) error {
+func setDenied(ctx context.Context, client kubernetes.Interface, pcr *certificatesv1.PodCertificateRequest, reason string) error {
 	pcr.Status.Conditions = append(pcr.Status.Conditions, metav1.Condition{
-		Type:               certificatesv1beta1.PodCertificateRequestConditionTypeDenied,
+		Type:               certificatesv1.PodCertificateRequestConditionTypeDenied,
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
 		Reason:             "InvalidRequest",
 		Message:            reason,
 	})
-	_, err := client.CertificatesV1beta1().PodCertificateRequests(pcr.Namespace).UpdateStatus(ctx, pcr, metav1.UpdateOptions{})
+	_, err := client.CertificatesV1().PodCertificateRequests(pcr.Namespace).UpdateStatus(ctx, pcr, metav1.UpdateOptions{})
 	return err
 }
