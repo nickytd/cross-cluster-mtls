@@ -1,0 +1,70 @@
+# Cross-cluster mTLS architecture
+# Render: d2 images/cross-cluster-mtls.d2 images/cross-cluster-mtls.png
+# (layout engine pinned to ELK via d2-config below)
+#
+# Two kind clusters. Each runs a signer (signer name sample.io/signer) holding
+# its own CA, issues pod certs via PodCertificateRequest, and distributes the
+# peer cluster's CA via a ClusterTrustBundle so the two sides trust each other.
+
+direction: right
+
+vars: {
+  d2-config: {
+    layout-engine: elk
+    pad: 40
+    sketch: true
+  }
+}
+
+classes: {
+  signer-a: {
+    style: { stroke: "#2e7d32"; font-color: "#2e7d32"; stroke-width: 2; border-radius: 6 }
+  }
+  signer-b: {
+    style: { stroke: "#1565c0"; font-color: "#1565c0"; stroke-width: 2; border-radius: 6 }
+  }
+  pod: {
+    style: { stroke-width: 2; border-radius: 6 }
+  }
+}
+
+cluster_a: Cluster A {
+  direction: down
+  style: { stroke-dash: 4; border-radius: 10 }
+
+  signer_a: "Signer (CA-A)\nsigns PodCertificateRequests" { class: signer-a }
+
+  client: "Client Pod\n\n- obtains podCertificate from CA-A\n- has clusterTrustBundle with CA-B root\n- connects to server with client cert" {
+    class: pod
+  }
+
+  # keep signer above the pod within the cluster
+  signer_a -> client: { style: { opacity: 0 } }
+}
+
+cluster_b: Cluster B {
+  direction: down
+  style: { stroke-dash: 4; border-radius: 10 }
+
+  signer_b: "Signer (CA-B)\nsigns PodCertificateRequests" { class: signer-b }
+
+  server: "Server Pod\n\n- obtains podCertificate from CA-B\n- has clusterTrustBundle with CA-A root\n- serves with CA-B signed certificate\n- verifies client certs signed with CA-A" {
+    class: pod
+  }
+
+  signer_b -> server: { style: { opacity: 0 } }
+}
+
+# mTLS connection across clusters (client -> server)
+cluster_a.client -> cluster_b.server: mTLS {
+  style: { stroke-width: 2 }
+}
+
+# Cross-cluster trust via ClusterTrustBundle (dotted, colored by CA).
+# Cluster A trusts CA-B; Cluster B trusts CA-A.
+cluster_a.client -> cluster_b.signer_b: "trusts CA-B" {
+  style: { stroke-dash: 3; stroke: "#1565c0"; font-color: "#1565c0" }
+}
+cluster_b.server -> cluster_a.signer_a: "trusts CA-A" {
+  style: { stroke-dash: 3; stroke: "#2e7d32"; font-color: "#2e7d32" }
+}
