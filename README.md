@@ -12,7 +12,7 @@ Demonstrates Kubernetes 1.37 `PodCertificateRequest` and `ClusterTrustBundle` AP
 ./setup.sh
 ```
 
-This sample script spins up 2 kind clusters demonstrating mTLS Client/Server communication supported by PodCertificateRequests which is GA since K8S 1.37
+This sample script spins up 2 kind clusters demonstrating mTLS Client/Server communication.
 
 - `PodCertificateRequest` — the `PodCertificateRequest` API and kubelet volume plugin
 - `ClusterTrustBundle` — the `ClusterTrustBundle` API
