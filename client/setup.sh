@@ -20,7 +20,7 @@ kubectl --context "$CONTEXT" -n "$NAMESPACE" wait --for=condition=Ready pod/mtls
 
 log_debug "Waiting for client to complete at least 2 successful requests..."
 for i in $(seq 1 30); do
-  count=$(kubectl --context "$CONTEXT" -n "$NAMESPACE" logs mtls-client 2>/dev/null | grep -c "response \[200\]" || true)
+  count=$(kubectl --context "$CONTEXT" -n "$NAMESPACE" logs mtls-client 2>/dev/null | grep -c "status=200" || true)
   if [ "$count" -ge 2 ]; then
     break
   fi
